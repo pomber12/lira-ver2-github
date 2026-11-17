@@ -84,7 +84,8 @@ function scheduleNext() {
 }
 
 // Когато я докоснеш
-function onTouch() {
+function onTouch(x) {
+  if (window.liraOffer && window.liraOffer(x)) return;   // „Лира 2“ подава ръка
   say(pick(TOUCH));
   scheduleNext();
 }

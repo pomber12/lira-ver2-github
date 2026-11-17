@@ -219,19 +219,39 @@
   // ---------- 4. Въртене и докосване ----------
   let drag = null, spinTarget = 0, spin = 0;
   canvas.addEventListener("pointerdown", (e) => {
+    if (window.liraHandGrab && window.liraHandGrab(e.clientX, e.clientY)) {   // хвана ръката ѝ
+      canvas.setPointerCapture(e.pointerId);
+      drag = null;
+      grabbingHand = true;
+      return;
+    }
     drag = { x: e.clientX, moved: 0 };
     canvas.setPointerCapture(e.pointerId);
     canvas.style.cursor = "grabbing";
+    // ако е с разтворени ръце и задържиш на място 0.25 с – прегръдка; плъзнеш ли – въртене
+    clearTimeout(hugTimer);
+    hugTimer = setTimeout(() => {
+      if (drag && drag.moved < 6 && window.liraHugGrab && window.liraHugGrab()) huggingNow = true;
+    }, 250);
   });
+  let hugTimer = null;
+  let grabbingHand = false;
+  let huggingNow = false;
   canvas.addEventListener("pointermove", (e) => {
+    if (grabbingHand) { window.liraHandMove(e.clientX, e.clientY); return; }
     if (!drag) return;
     const dx = e.clientX - drag.x;
     drag.x = e.clientX;
     drag.moved += Math.abs(dx);
+    if (huggingNow && drag.moved > 12) { huggingNow = false; window.liraHugRelease(); }   // плъзнеш ли – въртене
+    if (huggingNow) return;                    // докато я прегръщаш – не се върти
     spinTarget += dx * 0.01;
   });
-  canvas.addEventListener("pointerup", () => {
-    if (drag && drag.moved < 6) onTouch(); // кратко натискане = докосване
+  canvas.addEventListener("pointerup", (e) => {
+    clearTimeout(hugTimer);
+    if (huggingNow) { huggingNow = false; window.liraHugRelease(); drag = null; canvas.style.cursor = ""; return; }
+    if (grabbingHand) { grabbingHand = false; window.liraHandRelease(); return; }
+    if (drag && drag.moved < 6) onTouch(e.clientX); // кратко натискане = докосване
     drag = null;
     canvas.style.cursor = "";
   });
@@ -298,9 +318,7 @@
         for (let b = end.bone; b && byBone.has(b); b = b.parent) chain.unshift(byBone.get(b));
         return chain;
       }).filter((c) => c.length >= 2);
-      // най-много 8 кичура, разпределени равномерно
-      const step = Math.max(1, Math.floor(chains.length / 8));
-      return chains.filter((_, i) => i % step === 0).slice(0, 8);
+      return chains;                     // всички кичури – движат се заедно от една точка
     }
 
     function makeDot(kind) {
@@ -319,9 +337,8 @@
         const h = { kind: "limb", limb, el: makeDot(limb.chain.length === 1 && limb.end !== "head" ? "joint" : "limb") };
         handles.push(h);
       }
-      for (const chain of hairChains()) {
-        handles.push({ kind: "hair", chain, el: makeDot("hair") });
-      }
+      const chains = hairChains();
+      if (chains.length) handles.push({ kind: "hair", chains, el: makeDot("hair") });   // една точка за цялата коса
       for (const h of handles) {
         h.el.addEventListener("pointerdown", (e) => {
           e.preventDefault();
@@ -329,7 +346,10 @@
           h.el.setPointerCapture(e.pointerId);
           const p = handlePosition(h, new THREE.Vector3());
           grab = { h, depth: p.project(camera).z, target: null, start: null };
-          if (h.kind === "hair") grab.start = h.chain.map((j) => j._currentTail.clone());
+          if (h.kind === "hair") {
+            grab.start = h.chains.map((c) => c.map((j) => j._currentTail.clone()));
+            grab.center = handlePosition(h, new THREE.Vector3());
+          }
           h.el.classList.add("held");
         });
         h.el.addEventListener("pointermove", (e) => {
@@ -355,18 +375,23 @@
 
     function handlePosition(h, out) {
       if (h.kind === "limb") return bones[h.limb.end].getWorldPosition(out);
-      return out.copy(h.chain[h.chain.length - 1]._currentTail);
+      // точката за косата е над главата
+      bones.head.getWorldPosition(out);
+      out.y += 0.2;
+      return out;
     }
 
     // Докато държиш кичур – местим целия кичур към мишката (повече към края)
     function beforeUpdate() {
       if (!grab || grab.h.kind !== "hair" || !grab.target) return;
-      const chain = grab.h.chain;
-      const shift = grab.target.clone().sub(grab.start[grab.start.length - 1]);
-      chain.forEach((joint, i) => {
-        const w = (i + 1) / chain.length;
-        joint._currentTail.copy(grab.start[i]).addScaledVector(shift, w);
-        joint._prevTail.copy(joint._currentTail);   // без засилване
+      // местим всички кичури еднакво – повече към краищата
+      const shift = grab.target.clone().sub(grab.center);
+      grab.h.chains.forEach((chain, ci) => {
+        chain.forEach((joint, i) => {
+          const w = (i + 1) / chain.length;
+          joint._currentTail.copy(grab.start[ci][i]).addScaledVector(shift, w);
+          joint._prevTail.copy(joint._currentTail);   // без засилване
+        });
       });
     }
 
@@ -399,7 +424,7 @@
       if (on) build();
     }
 
-    return { posed, reset, beforeUpdate, drawHandles, get on() { return on; } };
+    return { posed, reset, beforeUpdate, drawHandles, reach, get on() { return on; } };
   })();
 
   // ---------- 5. Модели (визии) ----------
@@ -416,6 +441,8 @@
       line: ["Дълга руса коса и без светлинки. Харесвам се така.", "shy"] },
     { id: "gold",   name: "Злато",   parts: 2, line: ["Руса за днес. Да видим дали ще ме познаеш.", "play"] },
     { id: "coffee", name: "Кафе",    parts: 3, line: ["Къса коса, топли цветове. Като сутрешно кафе.", "love"] },
+    // Лира 2 – твоят модел от VRoid (възрастна). Само тя подава ръка, когато я докоснеш.
+    { id: "lira2",  name: "Лира 2",  parts: 2, adult: true, neck: 0.55, line: ["Здравей. Порастнах малко, харесва ли ти?", "shy"] },
   ];
 
   let vrm = null;          // моделът, който се вижда сега
@@ -547,6 +574,9 @@
     lookIndex = index;
     const look = LOOKS[index];
     lookBtn.textContent = "Визия: " + look.name;
+    const ob = document.getElementById("offerBtn");
+    if (ob) ob.hidden = !look.adult;
+    if (!look.adult && typeof setHug === "function") { try { setHug(false); } catch {} }
     try { localStorage.setItem("lira:look", look.id); } catch {}
 
     try {
@@ -581,6 +611,12 @@
             if (i === 4) plainMaterial(mesh, look.plain, null);        // дрехите
             if (i === 5) plainMaterial(mesh, true, look.boots || null); // ботушите
           });
+        }
+        // neck: колко дълга да е шията (1 = както е, 0.5 = наполовина)
+        if (look.neck) {
+          for (const node of [model.humanoid.getRawBoneNode("head"), model.humanoid.getNormalizedBoneNode("head")]) {
+            if (node) node.position.multiplyScalar(look.neck);
+          }
         }
         cache[look.id] = model;
       }
@@ -827,7 +863,101 @@
     setTimeout(() => { say(helloForNow()); scheduleNext(); }, 900);
   })();
 
-  // ---------- 6. Анимация ----------
+  // ---------- 5в. Подава ти ръка (само за визии с adult: true) ----------
+  // Докосваш я -> протяга дясната ръка към теб, свива пръсти и се усмихва.
+  // Докосваш я пак -> прибира ръката.
+  let offerOn = false, offerW = 0, offerSince = 0, bodyYaw = 0;
+  // ---------- Прегръдка (само за визии с adult: true) ----------
+  // Бутон „Прегръдка“ -> разтваря ръце към теб. Натиснеш и задържиш върху нея ->
+  // затваря очи и леко притиска ръце. Пак „Прегръдка“ -> отпуска ръцете.
+  let hugOn = false, hugW = 0, hugHold = false, hugHoldW = 0;
+  const hugBtn = document.getElementById("hugBtn");
+  function setHug(on) {
+    hugOn = on;
+    if (hugBtn) hugBtn.setAttribute("aria-pressed", on);
+    if (on) {
+      offerOn = false; holding = false;
+      if (typeof setSit === "function" && sitOn) setSit(false);
+      if (danceOn) { danceOn = false; document.getElementById("danceBtn")?.setAttribute("aria-pressed", false); }
+      say(pick(typeof HUG_LINES !== "undefined" ? HUG_LINES : [["Ела тук.", "love"]]));
+      scheduleNext();
+    }
+  }
+  if (hugBtn) hugBtn.onclick = () => {
+    const look = LOOKS[lookIndex];
+    if (look && look.adult) setHug(!hugOn);
+  };
+  window.liraHugGrab = () => {          // натискане върху нея, докато е с разтворени ръце
+    if (!hugOn || hugW < 0.6) return false;
+    hugHold = true;
+    say(pick(typeof HUG_HOLD_LINES !== "undefined" ? HUG_HOLD_LINES : [["Хубаво е така.", "love"]]));
+    scheduleNext();
+    return true;
+  };
+  window.liraHugRelease = () => { hugHold = false; };
+  const hugT = new THREE.Vector3(), hugS = new THREE.Vector3(), hugF = new THREE.Vector3(), hugL = new THREE.Vector3(), hugH = new THREE.Vector3();
+
+  let offerSide = "right";   // коя ръка подава
+  // Щракване върху нея (за визии с adult: true):
+  //  - ако подава ръка -> прибира я
+  //  - иначе -> разтваря ръце за прегръдка / отпуска ги
+  window.liraOffer = (clickX) => {
+    const look = LOOKS[lookIndex];
+    if (!look || !look.adult || !vrm) return false;     // другите визии просто казват нещо
+    if (offerOn) { setOffer(null); return true; }
+    setHug(!hugOn);
+    return true;
+  };
+
+  // Подаване на ръка – от менюто: бутонът минава през „дясна“ -> „лява“ -> изключено
+  const offerBtn = document.getElementById("offerBtn");
+  function setOffer(side) {
+    const was = offerOn;
+    offerOn = !!side;
+    if (side) offerSide = side;
+    offerSince = performance.now();
+    if (offerBtn) {
+      offerBtn.setAttribute("aria-pressed", offerOn);
+      offerBtn.textContent = offerOn ? (offerSide === "right" ? "Подай ръка: дясна" : "Подай ръка: лява") : "Подай ръка";
+    }
+    if (offerOn) {
+      if (hugOn) setHug(false);
+      if (!was) say(pick(typeof OFFER_LINES !== "undefined" ? OFFER_LINES : [["Дай ми ръка.", "love"]]));
+    } else if (was) {
+      say(["Добре, пускам те. Но само за малко.", "shy"]);
+    }
+    scheduleNext();
+  }
+  if (offerBtn) offerBtn.onclick = () => {
+    const look = LOOKS[lookIndex];
+    if (!look || !look.adult) return;
+    if (!offerOn) setOffer("right");
+    else if (offerSide === "right") setOffer("left");
+    else setOffer(null);
+  };
+  const offerTarget = new THREE.Vector3(), handNow = new THREE.Vector3(), chestPos = new THREE.Vector3(), toCam = new THREE.Vector3();
+  // Хващане: натискаш върху ръката ѝ, докато ти я подава
+  let holding = false, holdOffset = null;
+  const handScreen = { x: -999, y: -999, z: 0 }, handWorld = new THREE.Vector3();
+  window.liraHandGrab = (x, y) => {           // вика се при натискане; true = хвана ръката
+    if (!offerOn || offerW < 0.6) return false;
+    if (Math.hypot(x - handScreen.x, y - handScreen.y) > 55) return false;
+    holding = true;
+    holdOffset = new THREE.Vector3();
+    say(pick(typeof HOLD_LINES !== "undefined" ? HOLD_LINES : [["Хубаво е така.", "love"]]));
+    scheduleNext();
+    return true;
+  };
+  window.liraHandMove = (x, y) => {
+    if (!holding) return;
+    const p = new THREE.Vector3((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1, handScreen.z).unproject(camera);
+    holdOffset = p.sub(handWorld).add(holdOffset || new THREE.Vector3());
+    if (holdOffset.length() > 0.15) holdOffset.setLength(0.15);
+  };
+  window.liraHandRelease = () => { holding = false; holdOffset = null; };
+  window.liraHandPos = () => ({ x: handScreen.x, y: handScreen.y });   // къде е ръката ѝ на екрана
+
+    // ---------- 6. Анимация ----------
   const clock = new THREE.Clock();
   const glow = new THREE.Color(...COLORS.calm);
   const glowTarget = new THREE.Color();
@@ -848,8 +978,28 @@
   const face = { happy: 0, relaxed: 0, sad: 0, surprised: 0, angry: 0 };
   let nextBlink = 2, blinkStart = -1, nextGlitch = 5;
   let lean = 0;          // колко се е навела (0–1)
+  let crossW = 0;        // колко са скръстени ръцете (0–1)
+  const crossHands = {};
+  const HAND_WRAP = 0;   // колко се сгъват китките при скръстени ръце
+  const crossC = new THREE.Vector3(), crossF = new THREE.Vector3(), crossL = new THREE.Vector3(), crossH = new THREE.Vector3(), crossT = new THREE.Vector3();
   let sit = 0;           // колко е седнала (0 = стои, 1 = седи)
   let hipsBaseY = 0;
+
+  // Бутон „Разходка“ – тя върви на балкона, градът минава покрай вас
+  let walkOn = false, walkW = 0, walkPhase = 0;
+  const walkBtn = document.getElementById("walkBtn");
+  if (walkBtn) walkBtn.onclick = () => {
+    walkOn = !walkOn;
+    walkBtn.setAttribute("aria-pressed", walkOn);
+    if (walkOn) {
+      if (sitOn) setSit(false);
+      if (danceOn) { danceOn = false; document.getElementById("danceBtn")?.setAttribute("aria-pressed", false); }
+      if (typeof setHug === "function" && hugOn) setHug(false);
+      if (typeof setView === "function" && !(Balcony && Balcony.on)) setView("balcony");
+      say(pick(typeof WALK_LINES !== "undefined" ? WALK_LINES : [["Хайде да се поразходим.", "dream"]]));
+      scheduleNext();
+    }
+  };
 
   // Бутон „Танц“ – весел танц: ръце горе, стъпки встрани, завъртане и пляскане
   let danceOn = false, danceW = 0, danceTime = 0;
@@ -929,18 +1079,81 @@
       const pulse = Math.sin(beats * Math.PI);         // люлеене в ритъм
       const spinTurn = move === 2 ? (1 - Math.cos(inMove * Math.PI)) * Math.PI : 0;  // плавно пълно завъртане
 
-      vrm.scene.rotation.y = baseYaw + spin + spinTurn * danceW;
-      if (Room && Room.chairYaw) Room.chairYaw(spin);
+      // Когато ти подава ръка, се обръща с лице към теб (после се връща, накъдето си я завъртял)
+      const faceYou = Math.round(spin / (Math.PI * 2)) * Math.PI * 2;   // най-близкото „с лице към теб“
+      const offerEase = offerW * offerW * (3 - 2 * offerW);
+      bodyYaw = spin + (faceYou - spin) * offerEase;
+      vrm.scene.rotation.y = baseYaw + bodyYaw + spinTurn * danceW;
+      if (Room && Room.chairYaw) Room.chairYaw(bodyYaw);
+      // ако не я хванеш до 20 секунди – сама си прибира ръката
+      if (holding) offerSince = performance.now();       // докато я държиш – не прибира ръката
+      if (offerOn && performance.now() - offerSince > 20000) setOffer(null);   // сама я прибира след 20 с
 
       const B = bones;
       // Ръцете надолу (моделът по начало е с разперени ръце)
       // (костите, които си наместил с мишката в режим „Поза“, не се пипат)
       const free = (name) => B[name] && !Pose.posed.has(name);
       const breathe = Math.sin(t * 1.2) * 0.02;
-      if (free("leftUpperArm")) B.leftUpperArm.rotation.set(0.08, 0, armSign * (-1.18 + breathe));
-      if (free("rightUpperArm")) B.rightUpperArm.rotation.set(0.08, 0, armSign * (1.18 - breathe));
-      if (free("leftLowerArm")) B.leftLowerArm.rotation.set(0, armSign * -0.25, armSign * -0.12);
-      if (free("rightLowerArm")) B.rightLowerArm.rotation.set(0, armSign * 0.25, armSign * 0.12);
+      // Спокойна поза: ръцете надолу, леко напред (пред полата), лактите меко сгънати напред.
+      // (при „напред“ знакът зависи от типа модел – armSign; при лакътя е еднакъв за всички)
+      const armFwd = -armSign * 0.08;
+      if (free("leftUpperArm")) B.leftUpperArm.rotation.set(armFwd, 0, armSign * (-1.27 + breathe));
+      if (free("rightUpperArm")) B.rightUpperArm.rotation.set(armFwd, 0, armSign * (1.27 - breathe));
+      if (free("leftLowerArm")) B.leftLowerArm.rotation.set(0, -armSign * 0.3, 0);
+      if (free("rightLowerArm")) B.rightLowerArm.rotation.set(0, armSign * 0.3, 0);
+      // Скръстени ръце пред гърдите (в покой). Ръката, която ти подава, се изключва.
+      crossW = lerp(crossW, danceOn || sitOn || offerOn || hugOn || walkOn ? 0 : 1, 0.08);   // докато подава ръка – другата се отпуска надолу
+      if (crossW > 0.01 && B.chest && B.leftHand && B.rightHand) {
+        const crossEase = crossW * crossW * (3 - 2 * crossW);
+        vrm.scene.updateMatrixWorld(true);
+        B.chest.getWorldPosition(crossC);
+        crossF.set(Math.sin(bodyYaw), 0, Math.cos(bodyYaw));        // напред
+        crossL.set(Math.cos(bodyYaw), 0, -Math.sin(bodyYaw));       // нейното ляво
+        // Като човек със скръстени ръце: лакътят виси до тялото, предмишницата
+        // минава хоризонтално пред корема към другата ръка. Лявата е отгоре.
+        const arms = [
+          { side: "left", upper: B.leftUpperArm, lower: B.leftLowerArm, hand: B.leftHand, s: 1, fwd: 0.12, up: 0.04, wrap: 1 },
+          { side: "right", upper: B.rightUpperArm, lower: B.rightLowerArm, hand: B.rightHand, s: -1, fwd: 0.05, up: -0.05, wrap: -1 },
+        ];
+        for (const a of arms) {
+          if (a.side === offerSide && offerW > 0.01) continue;
+          if (Pose.posed.has(a.side + "UpperArm") || Pose.posed.has(a.side + "LowerArm")) continue;
+          a.upper.getWorldPosition(crossC);                       // рамото
+          a.lower.getWorldPosition(crossH);
+          const upperLen = crossC.distanceTo(crossH);
+          // 1) лакътят: надолу, малко напред и леко навън
+          crossT.copy(crossC).addScaledVector(crossL, a.s * 0.02).addScaledVector(crossF, a.side === "left" ? 0.2 : 0.17);
+          crossT.y -= upperLen;
+          a.lower.getWorldPosition(crossH);
+          crossT.lerpVectors(crossH, crossT, crossEase);
+          Pose.reach([a.upper], a.lower, crossT);
+          // 2) предмишницата: хоризонтално към другата страна и напред
+          a.lower.getWorldPosition(crossC);                       // лакътят
+          a.hand.getWorldPosition(crossH);
+          const foreLen = crossC.distanceTo(crossH);
+          crossT.set(0, 0, 0).addScaledVector(crossL, -a.s).addScaledVector(crossF, a.fwd);
+          crossT.y = a.up;
+          crossT.normalize().multiplyScalar(foreLen).add(crossC);
+          crossT.lerpVectors(crossH, crossT, crossEase);
+          Pose.reach([a.lower], a.hand, crossT);
+          // китката се сгъва към тялото – дланта обхваща другата ръка
+          a.hand.rotation.set(0, a.wrap * HAND_WRAP * crossEase, 0);
+          crossHands[a.side] = true;
+        }
+      }
+
+      // отпуснати, леко свити пръсти (освен на ръката, която ти подава);
+      // при скръстени ръце – свити повече, хващат другата ръка
+      for (const side of ["left", "right"]) {
+        if (side === offerSide && offerW > 0.01) continue;
+        const curl = (side === "left" ? -armSign : armSign) * (0.22 + 0.5 * crossW) * (1 - 0.85 * hugW);   // при прегръдка – отворени длани
+        for (const f of ["Index", "Middle", "Ring", "Little"]) {
+          for (const part of ["Proximal", "Intermediate", "Distal"]) {
+            const bone = vrm.humanoid.getNormalizedBoneNode(side + f + part);
+            if (bone && !Pose.posed.has(side + f + part)) bone.rotation.z = curl;
+          }
+        }
+      }
       // Сядане: бедрата напред, подбедриците надолу (плавно)
       sit = lerp(sit, sitOn ? 1 : 0, 0.06);
       const thigh = -armSign * 1.45 * sit, knee = armSign * 1.45 * sit;
@@ -983,6 +1196,98 @@
         // главата кима в ритъм
         if (free("head")) B.head.rotation.z += Math.sin(beats * Math.PI + 0.5) * 0.07 * w;
       }
+
+      // Ходене: краката крачат, ръцете се люлеят обратно на краката, леко подскачане
+      walkW = lerp(walkW, walkOn ? 1 : 0, 1 - Math.pow(0.05, dt));
+      if (walkW > 0.01) {
+        walkPhase += dt * 5.2;                              // около 1.6 крачки в секунда
+        const w = walkW, sw = Math.sin(walkPhase);
+        const legF = -armSign;                              // „напред“ за краката (зависи от типа модел)
+        const setLeg = (side, ph) => {
+          const up = B[side + "UpperLeg"], lo = B[side + "LowerLeg"];
+          if (!up || !lo || !free(side + "UpperLeg") || !free(side + "LowerLeg")) return;
+          up.rotation.x = legF * Math.sin(ph) * 0.42 * w;   // бедрото напред-назад
+          lo.rotation.x = Math.max(0, -Math.cos(ph)) * 0.75 * w;  // коляното се сгъва назад, когато кракът е отзад (еднакво за всички модели)
+        };
+        setLeg("left", walkPhase);
+        setLeg("right", walkPhase + Math.PI);
+        // ръцете – обратно на краката
+        const armSwing = (side, ph) => {
+          const up = B[side + "UpperArm"];
+          if (!up || !free(side + "UpperArm") || (side === offerSide && offerW > 0.01)) return;
+          up.rotation.x += -legF * Math.sin(ph) * 0.3 * w;
+        };
+        armSwing("left", walkPhase + Math.PI);
+        armSwing("right", walkPhase);
+        if (Balcony && Balcony.on) Balcony.walk(1.1 * w, dt);   // градът минава покрай нея
+      }
+
+      // Подава ръка: дясната ръка отива към теб, пръстите се свиват
+      const look = LOOKS[lookIndex];
+      if (!look || !look.adult) offerOn = false;
+      offerW = lerp(offerW, offerOn ? 1 : 0, 1 - Math.pow(0.03, dt));   // около секунда до края, независимо от кадрите
+      const OS = offerSide, m = OS === "right" ? 1 : -1;      // m: огледално за лявата ръка
+      const oUpper = B[OS + "UpperArm"], oLower = B[OS + "LowerArm"], oHand = B[OS + "Hand"];
+      if (offerW > 0.01 && oHand && free(OS + "UpperArm") && free(OS + "LowerArm")) {
+        const ease = offerW * offerW * (3 - 2 * offerW);
+        // 1) лакътят леко сгънат напред (фиксирано), за да не се извива назад/навътре
+        oLower.rotation.set(0, m * 0.45 * ease, 0);
+        vrm.scene.updateMatrixWorld(true);
+        // 2) точка пред нея (накъдето гледа тялото ѝ): от рамото – напред и надолу
+        oUpper.getWorldPosition(chestPos);
+        toCam.set(Math.sin(bodyYaw), 0, Math.cos(bodyYaw));
+        offerTarget.copy(chestPos).addScaledVector(toCam, 0.4);
+        offerTarget.y -= 0.25;
+        // ако я държиш – ръката ѝ леко следва твоята (най-много 15 см)
+        if (holding && holdOffset) offerTarget.add(holdOffset);
+        oHand.getWorldPosition(handNow);
+        offerTarget.lerpVectors(handNow, offerTarget, ease);
+        // 3) въртим само рамото, така че ръката да сочи към точката
+        Pose.reach([oUpper], oHand, offerTarget);
+        // къде е ръката ѝ на екрана (за да можеш да я хванеш)
+        oHand.getWorldPosition(handNow);
+        handWorld.copy(handNow);
+        const sp = handNow.clone().project(camera);
+        handScreen.x = (sp.x + 1) / 2 * innerWidth;
+        handScreen.y = (1 - sp.y) / 2 * innerHeight;
+        handScreen.z = sp.z;
+        // китката – дланта настрани, като за хващане
+        oHand.rotation.set(armSign * -1.2 * ease, 0, 0);
+        // пръстите леко свити
+        for (const f of ["Index", "Middle", "Ring", "Little"]) {
+          for (const part of ["Proximal", "Intermediate", "Distal"]) {
+            const bone = vrm.humanoid.getNormalizedBoneNode(OS + f + part);
+            if (bone) bone.rotation.z = m * armSign * (holding ? 0.95 : 0.45) * ease;   // стиска, когато я държиш
+          }
+        }
+        const thumb = vrm.humanoid.getNormalizedBoneNode(OS + "ThumbDistal");
+        if (thumb) thumb.rotation.y = m * armSign * -0.4 * ease;
+      }
+      // Прегръдка: двете ръце напред и встрани; при задържане – притискат се към средата
+      if (!look || !look.adult) { hugOn = false; hugHold = false; }
+      hugW = lerp(hugW, hugOn ? 1 : 0, 1 - Math.pow(0.03, dt));
+      hugHoldW = lerp(hugHoldW, hugHold ? 1 : 0, 1 - Math.pow(0.05, dt));
+      if (hugW > 0.01) {
+        const e = hugW * hugW * (3 - 2 * hugW);
+        hugF.set(Math.sin(bodyYaw), 0, Math.cos(bodyYaw));
+        hugL.set(Math.cos(bodyYaw), 0, -Math.sin(bodyYaw));
+        for (const [side, sgn, mm] of [["left", 1, -1], ["right", -1, 1]]) {
+          const up = B[side + "UpperArm"], lo = B[side + "LowerArm"], hd = B[side + "Hand"];
+          if (!up || !lo || !hd || !free(side + "UpperArm") || !free(side + "LowerArm")) continue;
+          lo.rotation.set(0, mm * (0.5 + 0.6 * hugHoldW) * e, 0);        // лактите сгънати напред
+          vrm.scene.updateMatrixWorld(true);
+          up.getWorldPosition(hugS);
+          hugT.copy(hugS)
+            .addScaledVector(hugF, 0.32 + 0.04 * hugHoldW)
+            .addScaledVector(hugL, sgn * (0.22 - 0.24 * hugHoldW));    // разтворени -> към средата
+          hugT.y -= 0.08 + 0.04 * hugHoldW;
+          hd.getWorldPosition(hugH);
+          hugT.lerpVectors(hugH, hugT, e);
+          Pose.reach([up], hd, hugT);
+          hd.rotation.set(armSign * -0.3 * e, 0, 0);                     // дланите леко навътре
+        }
+      }
+
       // Дишане (+ на балкона се навежда към теб)
       lean = lerp(lean, Balcony && Balcony.on ? 1 : 0, 0.03);
       if (free("spine")) B.spine.rotation.x = Math.sin(t * 1.5) * 0.012 + armSign * lean * 0.12;
@@ -992,6 +1297,7 @@
         B.hips.rotation.z = Math.sin(t * 0.45) * 0.025;
         B.hips.position.x = Math.sin(t * 0.45) * 0.01;
         B.hips.position.y = hipsBaseY - 0.43 * sit;      // при сядане ханшът слиза до седалката
+        if (walkW > 0.01) B.hips.position.y += Math.abs(Math.cos(walkPhase)) * 0.018 * walkW;   // подскача при всяка крачка
         if (danceW > 0.01) {                              // подскачане и стъпки при танц
           B.hips.position.y += Math.abs(Math.sin(beats * Math.PI)) * 0.025 * danceW;
           if (move === 1) B.hips.position.x += pulse * 0.06 * danceW;
@@ -1013,10 +1319,12 @@
           face[name] = lerp(face[name], want[name] || 0, 0.05);
           expr.setValue(name, face[name]);
         }
+        if (offerW > 0.01) expr.setValue("happy", Math.max(face.happy, (holding ? 1 : 0.75) * offerW));   // усмихва се
+        if (hugW > 0.01) expr.setValue("happy", Math.max(face.happy, 0.8 * hugW));
         // Мигане на всеки 2.5–6 секунди
         if (t > nextBlink) { blinkStart = t; nextBlink = t + 2.5 + Math.random() * 3.5; }
         const b = (t - blinkStart) / 0.16;
-        expr.setValue("blink", b >= 0 && b <= 1 ? Math.sin(b * Math.PI) : 0);
+        expr.setValue("blink", Math.max(b >= 0 && b <= 1 ? Math.sin(b * Math.PI) : 0, 0.85 * hugHoldW));   // затваря очи при прегръдка
         // Уста докато говори
         const mouth = lira.talking && !reduceMotion
           ? Math.max(0, Math.sin(t * 14) * Math.sin(t * 5.1)) : 0;

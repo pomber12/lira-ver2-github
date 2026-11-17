@@ -30,3 +30,4 @@
   (свободно ползване, промени и споделяне).
 - `models/neon.vrm`, `gold.vrm`, `coffee.vrm` – примерни модели на VRoid Studio от pixiv, CC0.
 - `lira-engine.js` – three.js и @pixiv/three-vrm, MIT License.
+- `models/lira2.vrm.*` – „Лира 2“, модел от VRoid Studio, CC BY. Докосни я и тя ти подава ръка.

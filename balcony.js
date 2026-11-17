@@ -111,6 +111,7 @@ const Balcony = (() => {
   street.rotation.x = -Math.PI / 2;
   scene.add(street);
   // Мокър асфалт: светли ивици, които „отразяват“ неона
+  const strips = [];
   for (let i = 0; i < 40; i++) {
     const strip = new THREE.Mesh(
       new THREE.PlaneGeometry(0.02 + rand() * 0.05, 0.6 + rand() * 1.5),
@@ -119,6 +120,7 @@ const Balcony = (() => {
     strip.rotation.x = -Math.PI / 2;
     strip.position.set((rand() - 0.5) * 1.8, 0.002, 4 - rand() * 12);
     scene.add(strip);
+    strips.push(strip);
   }
   // Голямо мъгливо сияние зад нея
   const glowTex = (() => {
@@ -165,6 +167,19 @@ const Balcony = (() => {
       document.body.classList.toggle("balcony", on);
     },
     // glow: цветът на настроението ѝ (THREE.Color)
+    // Разходка: сградите се плъзгат покрай нея (speed в м/с; 0 = стои)
+    walk(speed, dt) {
+      if (!speed) return;
+      // тя гледа към +z, затова градът тече към -z (минава покрай нея назад)
+      for (const b of buildings.children) {
+        b.position.z -= speed * dt;
+        if (b.position.z < -25) b.position.z += 33;  // излязлата отзад сграда се появява пак отпред
+      }
+      for (const s of strips) {
+        s.position.z -= speed * dt;
+        if (s.position.z < -8) s.position.z += 12;
+      }
+    },
     render(camera, time, glow) {
       if (!on) return;
       halo.material.color.copy(glow).lerp(new THREE.Color(0xff4fd0), 0.5);
